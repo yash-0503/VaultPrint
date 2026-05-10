@@ -1,0 +1,106 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  @apply bg-white text-vault-navy antialiased;
+}
+
+.vault-locked {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* docx-preview structure */
+.vault-docx-host.docx-wrapper,
+.vault-docx-host .docx-wrapper {
+  padding: 0;
+}
+
+@media print {
+  /**
+   * Only the confidential document region is visible on paper —
+   * no headers, OTP UI, logos, etc. Browser margin URL/title requires:
+   * print dialog → uncheck “Headers & footers” (cannot be overridden from JS).
+   */
+  .no-print,
+  header,
+  footer,
+  nav {
+    display: none !important;
+  }
+
+  @page {
+    margin: 0;
+    size: auto;
+  }
+
+  html,
+  body {
+    margin: 0 !important;
+    padding: 0 !important;
+    background: white !important;
+    width: 100% !important;
+  }
+
+  body * {
+    visibility: hidden;
+  }
+
+  .vault-print-only,
+  .vault-print-only * {
+    visibility: visible !important;
+  }
+
+  .vault-print-only {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 8mm !important;
+    overflow: visible !important;
+    max-height: none !important;
+    border: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    background: white !important;
+    user-select: none !important;
+    -webkit-user-select: none !important;
+  }
+
+  .vault-print-canvas {
+    display: block !important;
+    max-width: 100% !important;
+    width: auto !important;
+    height: auto !important;
+    max-height: none !important;
+    margin: 0 auto !important;
+    page-break-inside: avoid;
+  }
+
+  .vault-docx-host {
+    max-height: none !important;
+    overflow: visible !important;
+    font-size: 12pt !important;
+  }
+
+  .vault-docx-host .docx {
+    overflow: visible !important;
+    max-width: none !important;
+    width: 100% !important;
+  }
+
+  /**
+   * Raster/PDF viewport clamp only on screen — print uses full bleed area inside @page margins.
+   */
+  .vault-print-canvas:not(.hidden) {
+    visibility: visible !important;
+  }
+}

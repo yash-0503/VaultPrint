@@ -1,0 +1,36 @@
+{
+  "name": "vaultprint-web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "postinstall": "node scripts/sync-pdf-worker.cjs"
+  },
+  "dependencies": {
+    "docx-preview": "^0.3.7",
+    "next": "14.2.35",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "4.10.38",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-easy-crop": "^5.5.7",
+    "socket.io-client": "^4.8.1"
+  },
+  "overrides": {
+    "postcss": "8.5.10"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.10",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "autoprefixer": "^10.4.20",
+    "eslint": "^8.57.1",
+    "eslint-config-next": "14.2.35",
+    "postcss": "8.5.10",
+    "tailwindcss": "^3.4.15",
+    "typescript": "^5.7.2"
+  }
+}
