@@ -10,6 +10,7 @@
     "postinstall": "node scripts/sync-pdf-worker.cjs"
   },
   "dependencies": {
+    "@vercel/analytics": "^2.0.1",
     "docx-preview": "^0.3.7",
     "next": "14.2.35",
     "pdf-lib": "^1.17.1",

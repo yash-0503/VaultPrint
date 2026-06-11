@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
+import { Analytics } from "@vercel/analytics/next";
 
 import "./globals.css";
 
@@ -22,7 +23,10 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className={inter.variable}>
-      <body className="min-h-screen font-sans bg-vault-canvas">{children}</body>
+      <body className="min-h-screen font-sans bg-vault-canvas">
+        {children}
+        <Analytics />
+      </body>
     </html>
   );
 }
