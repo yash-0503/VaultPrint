@@ -6,11 +6,19 @@ import { io, type Socket } from "socket.io-client";
 import { FileDropzone } from "@/components/FileDropzone";
 import { ImageCropToA4Modal } from "@/components/ImageCropToA4Modal";
 import { getPublicAppOrigin, getSignalingUrl } from "@/lib/config";
-import { mimeForLocalFile } from "@/lib/mime";
+import {
+  detectIcePath,
+  icePathDisplay,
+  turnConfigHint,
+  type IcePathLabel,
+} from "@/lib/iceStatus";
 import { DEFAULT_RTC_CONFIGURATION } from "@/lib/ice";
+import { mimeForLocalFile } from "@/lib/mime";
 import { isValidSessionCode, SESSION_CODE_LENGTH } from "@/lib/sessionCode";
 import {
   CHUNK_SIZE_BYTES,
+  type BatchCompleteMessage,
+  type BatchStartMessage,
   type ControlMessage,
   type FileStartMessage,
 } from "@/lib/protocol";
@@ -21,6 +29,12 @@ type SignalingError = { code: string; message: string };
 type CropSessionState = {
   objectUrl: string;
   originalFileName: string;
+};
+
+type OutgoingFile = {
+  buffer: ArrayBuffer;
+  mime: string;
+  displayName: string;
 };
 
 /** Pause sends while the browser buffers a large backlog. */
@@ -49,20 +63,21 @@ export function SenderClient() {
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
   const pinRef = useRef<string | null>(null);
-  const fileBufferRef = useRef<ArrayBuffer | null>(null);
-  const fileMimeRef = useRef<string | null>(null);
-  const fileOriginalNameRef = useRef<string | null>(null);
+  const outgoingQueueRef = useRef<OutgoingFile[]>([]);
+  const imageCropQueueRef = useRef<{ file: File; buffer: ArrayBuffer }[]>([]);
+  const sendingRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const remainingRef = useRef(INITIAL_TIMER_SEC);
 
   const [pin, setPin] = useState<string | null>(null);
-  const [fileName, setFileName] = useState<string | null>(null);
+  const [queuedNames, setQueuedNames] = useState<string[]>([]);
   const [status, setStatus] = useState<string>("Connecting…");
   const [peerLabel, setPeerLabel] = useState<string>("Waiting for shop PC…");
   const [channelOpen, setChannelOpen] = useState(false);
   const [remainingSec, setRemainingSec] = useState<number | null>(null);
   const [shareHint, setShareHint] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [icePath, setIcePath] = useState<IcePathLabel>("not-connected");
   /** When set, the A4 crop modal overlays the sender UI for raster images only. */
   const [cropSession, setCropSession] = useState<CropSessionState | null>(null);
   /** Tracks active crop blob URL so we revoke on unload / modal replace. */
@@ -133,22 +148,20 @@ export function SenderClient() {
     };
   }, []);
 
-  const sendPreparedFile = useCallback(async () => {
-    const dc = dcRef.current;
-    const buf = fileBufferRef.current;
-    const mime = fileMimeRef.current;
-    if (!dc || dc.readyState !== "open" || !buf || !mime) {
-      return;
-    }
+  const syncQueuedNames = useCallback(() => {
+    setQueuedNames(outgoingQueueRef.current.map((f) => f.displayName));
+  }, []);
+
+  const sendOneFile = useCallback(async (dc: RTCDataChannel, file: OutgoingFile) => {
     const start: FileStartMessage = {
       kind: "vaultprint-file-start",
-      mimeType: mime,
-      byteLength: buf.byteLength,
-      suggestedFilename: fileOriginalNameRef.current ?? undefined,
+      mimeType: file.mime,
+      byteLength: file.buffer.byteLength,
+      suggestedFilename: file.displayName,
     };
     dc.send(JSON.stringify(start));
     await waitForSendWindow(dc);
-    const view = new Uint8Array(buf);
+    const view = new Uint8Array(file.buffer);
     let offset = 0;
     while (offset < view.byteLength) {
       const end = Math.min(offset + CHUNK_SIZE_BYTES, view.byteLength);
@@ -156,30 +169,86 @@ export function SenderClient() {
       offset = end;
       await waitForSendWindow(dc);
     }
-    setStatus("Document sent — shop can preview and print.");
   }, []);
 
-  const attachOutgoingDocument = useCallback(
+  const sendQueuedFiles = useCallback(async () => {
+    const dc = dcRef.current;
+    const queue = outgoingQueueRef.current;
+    if (!dc || dc.readyState !== "open" || queue.length === 0 || sendingRef.current) {
+      return;
+    }
+    sendingRef.current = true;
+    try {
+      const batchStart: BatchStartMessage = {
+        kind: "vaultprint-batch-start",
+        totalFiles: queue.length,
+      };
+      dc.send(JSON.stringify(batchStart));
+      await waitForSendWindow(dc);
+      for (const file of queue) {
+        await sendOneFile(dc, file);
+      }
+      const batchComplete: BatchCompleteMessage = { kind: "vaultprint-batch-complete" };
+      dc.send(JSON.stringify(batchComplete));
+      const count = queue.length;
+      outgoingQueueRef.current = outgoingQueueRef.current.slice(count);
+      syncQueuedNames();
+      setStatus(
+        count === 1
+          ? "Document sent — shop can preview and print."
+          : `${count} documents sent — shop can preview and print.`,
+      );
+    } finally {
+      sendingRef.current = false;
+    }
+  }, [sendOneFile, syncQueuedNames]);
+
+  const enqueueOutgoingDocument = useCallback(
     (
       buf: ArrayBuffer,
       mime: string,
       displayName: string,
       hint: string | null,
     ) => {
-      fileBufferRef.current = buf;
-      fileMimeRef.current = mime;
-      fileOriginalNameRef.current = displayName;
-      setFileName(displayName);
+      outgoingQueueRef.current.push({ buffer: buf, mime, displayName });
+      syncQueuedNames();
+      const count = outgoingQueueRef.current.length;
       setStatus(
-        hint ?? "Document ready on device — will send when the link opens.",
+        hint ??
+          (count === 1
+            ? "Document queued on device — sends when the link opens."
+            : `${count} documents queued — send when the link opens.`),
       );
       const dc = dcRef.current;
       if (dc && dc.readyState === "open") {
-        void sendPreparedFile();
+        void sendQueuedFiles();
       }
     },
-    [sendPreparedFile],
+    [sendQueuedFiles, syncQueuedNames],
   );
+
+  const startNextImageCrop = useCallback(() => {
+    const next = imageCropQueueRef.current.shift();
+    if (!next) {
+      return;
+    }
+    disposeCropSession();
+    const objectUrl = URL.createObjectURL(next.file);
+    cropLifecycleRef.current = {
+      objectUrl,
+      originalFileName: next.file.name,
+    };
+    setCropSession({
+      objectUrl,
+      originalFileName: next.file.name,
+    });
+    const remaining = imageCropQueueRef.current.length;
+    setStatus(
+      remaining > 0
+        ? `Crop & rotate (${remaining} more after this) — exports A4 PDF before sending.`
+        : "Crop & rotate — we export a centred A4 PDF on this device before sending.",
+    );
+  }, [disposeCropSession]);
 
   /** Single mount: connect, wire signaling, build WebRTC exactly once per lifetime. */
   useEffect(() => {
@@ -235,11 +304,13 @@ export function SenderClient() {
             timerRef.current = null;
           }
         }, 1000);
-        void sendPreparedFile();
+        void sendQueuedFiles();
+        void detectIcePath(pc).then(setIcePath);
       };
 
       dc.onclose = () => {
         setChannelOpen(false);
+        setIcePath("not-connected");
         setPeerLabel("Link closed");
       };
 
@@ -256,6 +327,9 @@ export function SenderClient() {
       pc.onconnectionstatechange = () => {
         if (pc.connectionState === "failed") {
           setError("WebRTC connection failed — check firewalls or try again.");
+        }
+        if (pc.connectionState === "connected") {
+          void detectIcePath(pc).then(setIcePath);
         }
       };
 
@@ -343,31 +417,27 @@ export function SenderClient() {
       socketRef.current = null;
       teardownMedia();
     };
-  }, [sendPreparedFile, teardownMedia]);
+  }, [sendQueuedFiles, teardownMedia]);
 
-  const handleFile = useCallback(
-    (file: File, buffer: ArrayBuffer) => {
-      const mime = mimeForLocalFile(file);
-      if (mime.startsWith("image/")) {
-        disposeCropSession();
-        const objectUrl = URL.createObjectURL(file);
-        cropLifecycleRef.current = {
-          objectUrl,
-          originalFileName: file.name,
-        };
-        setCropSession({
-          objectUrl,
-          originalFileName: file.name,
-        });
-        setStatus(
-          "Crop & rotate — we export a centred A4 PDF on this device before sending.",
-        );
-        return;
+  const handleFiles = useCallback(
+    (items: { file: File; buffer: ArrayBuffer }[]) => {
+      const images: { file: File; buffer: ArrayBuffer }[] = [];
+      for (const { file, buffer } of items) {
+        const mime = mimeForLocalFile(file);
+        if (mime.startsWith("image/")) {
+          images.push({ file, buffer });
+          continue;
+        }
+        enqueueOutgoingDocument(buffer, mime, file.name, null);
       }
-      disposeCropSession();
-      attachOutgoingDocument(buffer, mime, file.name, null);
+      if (images.length > 0) {
+        imageCropQueueRef.current.push(...images);
+        if (!cropSession) {
+          startNextImageCrop();
+        }
+      }
     },
-    [attachOutgoingDocument, disposeCropSession],
+    [cropSession, enqueueOutgoingDocument, startNextImageCrop],
   );
 
   const onShare = async () => {
@@ -444,20 +514,25 @@ export function SenderClient() {
         originalFileName={cropSession?.originalFileName ?? ""}
         onCancel={() => {
           disposeCropSession();
-          setStatus("Choose a PDF or scan when ready.");
+          if (imageCropQueueRef.current.length > 0) {
+            startNextImageCrop();
+          } else {
+            setStatus("Choose a PDF or scan when ready.");
+          }
         }}
         onReadyPdf={(pdfArrayBuffer, suggestedFileName) => {
           disposeCropSession();
-          attachOutgoingDocument(
+          enqueueOutgoingDocument(
             pdfArrayBuffer,
             "application/pdf",
             suggestedFileName,
             "Print-ready A4 PDF — queued; sends when linked.",
           );
+          startNextImageCrop();
         }}
       />
 
-      <FileDropzone disabled={false} fileLabel={fileName} onFile={handleFile} />
+      <FileDropzone disabled={false} fileLabels={queuedNames} onFiles={handleFiles} />
 
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-card">
         <div className="flex items-center justify-between gap-3">
@@ -471,6 +546,13 @@ export function SenderClient() {
                 ? "Data channel open — transfer encrypted peer-to-peer."
                 : "Idle"}
             </p>
+            {channelOpen ? (
+              <p className="mt-1 text-xs text-slate-500">
+                ICE path: {icePathDisplay(icePath)}
+              </p>
+            ) : turnConfigHint() ? (
+              <p className="mt-1 text-xs text-amber-700">{turnConfigHint()}</p>
+            ) : null}
           </div>
           <span
             className={`h-3 w-3 rounded-full ${

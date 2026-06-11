@@ -5,26 +5,40 @@ import { useCallback, useId, useState } from "react";
 const ACCEPT =
   "application/pdf,image/png,image/jpeg,image/webp,image/gif,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
-export interface FileDropzoneProps {
-  disabled?: boolean;
-  fileLabel: string | null;
-  onFile: (file: File, buffer: ArrayBuffer) => void;
+export interface QueuedFile {
+  file: File;
+  buffer: ArrayBuffer;
 }
 
-export function FileDropzone({ disabled, fileLabel, onFile }: FileDropzoneProps) {
+export interface FileDropzoneProps {
+  disabled?: boolean;
+  fileLabels: string[];
+  onFiles: (items: QueuedFile[]) => void;
+}
+
+export function FileDropzone({ disabled, fileLabels, onFiles }: FileDropzoneProps) {
   const inputId = useId();
   const [dragOver, setDragOver] = useState(false);
 
   const handleFiles = useCallback(
     async (list: FileList | null) => {
-      const file = list?.[0];
-      if (!file || disabled) {
+      if (!list?.length || disabled) {
         return;
       }
-      const buffer = await file.arrayBuffer();
-      onFile(file, buffer);
+      const items: QueuedFile[] = [];
+      for (let i = 0; i < list.length; i++) {
+        const file = list[i];
+        if (!file) {
+          continue;
+        }
+        const buffer = await file.arrayBuffer();
+        items.push({ file, buffer });
+      }
+      if (items.length > 0) {
+        onFiles(items);
+      }
     },
-    [disabled, onFile],
+    [disabled, onFiles],
   );
 
   return (
@@ -49,9 +63,13 @@ export function FileDropzone({ disabled, fileLabel, onFile }: FileDropzoneProps)
         id={inputId}
         type="file"
         accept={ACCEPT}
+        multiple
         className="sr-only"
         disabled={disabled}
-        onChange={(e) => void handleFiles(e.target.files)}
+        onChange={(e) => {
+          void handleFiles(e.target.files);
+          e.target.value = "";
+        }}
       />
       <label
         htmlFor={inputId}
@@ -59,11 +77,17 @@ export function FileDropzone({ disabled, fileLabel, onFile }: FileDropzoneProps)
           disabled ? "cursor-not-allowed" : ""
         }`}
       >
-        <span className="text-vault-navy">Drop a PDF or image here</span>
-        <span className="block text-slate-500">or tap to browse</span>
+        <span className="text-vault-navy">Drop PDFs or images here</span>
+        <span className="block text-slate-500">or tap to browse (multiple files OK)</span>
       </label>
-      {fileLabel ? (
-        <p className="mt-3 truncate text-xs font-semibold text-vault-emerald">{fileLabel}</p>
+      {fileLabels.length > 0 ? (
+        <ul className="mt-3 space-y-1 text-left text-xs font-semibold text-vault-emerald">
+          {fileLabels.map((label, index) => (
+            <li key={`${label}-${index}`} className="truncate">
+              {label}
+            </li>
+          ))}
+        </ul>
       ) : null}
     </div>
   );

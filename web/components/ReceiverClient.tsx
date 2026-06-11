@@ -1,142 +1,37 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import type { Options as DocxPreviewOptions } from "docx-preview";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { io, type Socket } from "socket.io-client";
 
+import { DocumentPreview } from "@/components/DocumentPreview";
 import { OtpInput } from "@/components/OtpInput";
 import { getSignalingUrl } from "@/lib/config";
+import {
+  detectIcePath,
+  icePathDisplay,
+  turnConfigHint,
+  type IcePathLabel,
+} from "@/lib/iceStatus";
 import { DEFAULT_RTC_CONFIGURATION } from "@/lib/ice";
-import { MIME_DOCX, resolveWireMime } from "@/lib/mime";
 import { parseJsonMessage, type AnyJsonMessage } from "@/lib/protocol";
 import { SESSION_CODE_LENGTH, sessionCodeLengthLabel } from "@/lib/sessionCode";
 
-type PreviewSurface = "none" | "canvas" | "docx";
-
-function wipeCanvas(canvas: HTMLCanvasElement | null): void {
-  if (!canvas) {
-    return;
-  }
-  const ctx = canvas.getContext("2d");
-  if (!ctx) {
-    return;
-  }
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  canvas.width = 0;
-  canvas.height = 0;
-}
-
-async function drawRasterImage(
-  buffer: ArrayBuffer,
-  mime: string,
-  canvas: HTMLCanvasElement,
-): Promise<void> {
-  const ctx = canvas.getContext("2d");
-  if (!ctx) {
-    return;
-  }
-  const blob = new Blob([buffer], { type: mime });
-
-  try {
-    const bmp = await createImageBitmap(blob);
-    canvas.width = bmp.width;
-    canvas.height = bmp.height;
-    ctx.drawImage(bmp, 0, 0);
-    bmp.close?.();
-    return;
-  } catch {
-    //
-  }
-
-  const url = URL.createObjectURL(blob);
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const img = new Image();
-      img.onload = () => {
-        canvas.width = img.naturalWidth;
-        canvas.height = img.naturalHeight;
-        ctx.drawImage(img, 0, 0);
-        resolve();
-      };
-      img.onerror = () => reject(new Error("Could not decode image"));
-      img.src = url;
-    });
-  } finally {
-    URL.revokeObjectURL(url);
-  }
-}
-
-async function renderDocumentPreview(
-  buffer: ArrayBuffer,
-  wireMime: string,
-  suggestedFilename: string | undefined,
-  canvas: HTMLCanvasElement | null,
-  docxHost: HTMLDivElement | null,
-): Promise<PreviewSurface> {
-  const effective = resolveWireMime(wireMime, buffer, suggestedFilename);
-  docxHost && (docxHost.innerHTML = "");
-  wipeCanvas(canvas);
-
-  const isDocx =
-    effective === MIME_DOCX ||
-    effective.toLowerCase().includes("wordprocessingml.document");
-
-  if (isDocx) {
-    if (!docxHost) {
-      throw new Error("Missing document container for Word preview.");
-    }
-    const blob = new Blob([buffer], { type: MIME_DOCX });
-    const { renderAsync } = await import("docx-preview");
-    const opts: Partial<DocxPreviewOptions> = {
-      hideWrapperOnPrint: true,
-      inWrapper: true,
-      ignoreWidth: false,
-      ignoreHeight: false,
-      breakPages: true,
-      className: "vault-print-docx-inner",
-    };
-    await renderAsync(blob, docxHost, undefined, opts);
-    return "docx";
-  }
-
-  if (!canvas) {
-    throw new Error("Missing canvas for raster/PDF preview.");
-  }
-
-  if (effective.startsWith("image/")) {
-    await drawRasterImage(buffer, effective, canvas);
-    return "canvas";
-  }
-
-  if (effective === "application/pdf" || effective.endsWith("/pdf")) {
-    const pdfjs = await import("pdfjs-dist");
-    /** Self-hosted worker (see public/pdf.worker.min.mjs; synced via npm postinstall to match pdfjs-dist). */
-    pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
-    const loadingTask = pdfjs.getDocument({ data: new Uint8Array(buffer) });
-    const pdf = await loadingTask.promise;
-    const page = await pdf.getPage(1);
-    const baseViewport = page.getViewport({ scale: 1 });
-    const scale = Math.min(1200 / baseViewport.width, 1600 / baseViewport.height, 2.5);
-    const viewport = page.getViewport({ scale });
-    const ctx = canvas.getContext("2d");
-    if (!ctx) {
-      return "canvas";
-    }
-    canvas.width = viewport.width;
-    canvas.height = viewport.height;
-    const renderTask = page.render({ canvasContext: ctx, viewport });
-    await renderTask.promise;
-    return "canvas";
-  }
-
-  throw new Error(`Unsupported or unrecognized file type (${effective}).`);
-}
+type PreviewDocument = {
+  id: number;
+  buffer: ArrayBuffer;
+  mime: string;
+  suggestedFilename?: string;
+  label: string;
+};
 
 export function ReceiverClient() {
   const socketRef = useRef<Socket | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const joinedPinRef = useRef<string | null>(null);
-  const fileBufferRef = useRef<ArrayBuffer | null>(null);
+  const nextDocIdRef = useRef(0);
+  const batchExpectedRef = useRef<number | null>(null);
+  const batchCompleteRef = useRef(false);
+  const receivedCountRef = useRef(0);
   const fillStateRef = useRef<{
     target: Uint8Array;
     expected: number;
@@ -145,8 +40,6 @@ export function ReceiverClient() {
     suggestedFilename?: string;
   } | null>(null);
   const pendingOfferRef = useRef<RTCSessionDescriptionInit | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const docxHostRef = useRef<HTMLDivElement | null>(null);
   const onPeerReadyRef = useRef<() => Promise<void>>(async () => {});
 
   const [pin, setPin] = useState("");
@@ -156,50 +49,170 @@ export function ReceiverClient() {
   );
   const [error, setError] = useState<string | null>(null);
   const [remainingSec, setRemainingSec] = useState<number | null>(null);
-  const [previewReady, setPreviewReady] = useState(false);
-  const [previewSurface, setPreviewSurface] = useState<PreviewSurface>("none");
+  const [documents, setDocuments] = useState<PreviewDocument[]>([]);
+  const [printReady, setPrintReady] = useState(false);
   const [channelOpen, setChannelOpen] = useState(false);
+  const [icePath, setIcePath] = useState<IcePathLabel>("not-connected");
 
-  const killMedia = () => {
-    fileBufferRef.current = null;
+  const resetPreview = useCallback(() => {
+    nextDocIdRef.current = 0;
+    batchExpectedRef.current = null;
+    batchCompleteRef.current = false;
+    receivedCountRef.current = 0;
     fillStateRef.current = null;
-    wipeCanvas(canvasRef.current);
-    if (docxHostRef.current) {
-      docxHostRef.current.innerHTML = "";
-    }
-    setPreviewSurface("none");
-    setPreviewReady(false);
+    setDocuments([]);
+    setPrintReady(false);
+  }, []);
+
+  const killMedia = useCallback(() => {
+    resetPreview();
     pcRef.current?.close();
     pcRef.current = null;
     setChannelOpen(false);
-  };
+    setIcePath("not-connected");
+  }, [resetPreview]);
 
-  const onBeforePrint = () => {
-    /** Keep DOM intact until layout for print completes. */
-  };
-
-  const onAfterPrint = () => {
-    fileBufferRef.current = new ArrayBuffer(0);
-    fillStateRef.current = null;
-    wipeCanvas(canvasRef.current);
-    if (docxHostRef.current) {
-      docxHostRef.current.innerHTML = "";
-    }
-    setPreviewSurface("none");
-    setPreviewReady(false);
+  const onAfterPrint = useCallback(() => {
+    resetPreview();
     pcRef.current?.close();
     pcRef.current = null;
     setChannelOpen(false);
-  };
+    setIcePath("not-connected");
+  }, [resetPreview]);
+
+  const finalizeIfReady = useCallback(() => {
+    const expected = batchExpectedRef.current;
+    const received = receivedCountRef.current;
+    const batchDone = batchCompleteRef.current || expected === null;
+
+    if (received === 0) {
+      return;
+    }
+
+    if (expected !== null && received < expected) {
+      setStatus(`Receiving document ${received} of ${expected}…`);
+      return;
+    }
+
+    if (expected !== null && !batchDone) {
+      setStatus(`Received ${received} of ${expected} — finishing transfer…`);
+      return;
+    }
+
+    setPrintReady(true);
+    setStatus(
+      received === 1
+        ? "Document ready — verify on screen, then print."
+        : `${received} documents ready — verify on screen, then print.`,
+    );
+  }, []);
+
+  const onFileComplete = useCallback(
+    (buffer: ArrayBuffer, mime: string, suggestedFilename?: string) => {
+      receivedCountRef.current += 1;
+      const index = receivedCountRef.current;
+      const expected = batchExpectedRef.current;
+      const label =
+        expected !== null && expected > 1
+          ? `Document ${index} of ${expected}${suggestedFilename ? ` — ${suggestedFilename}` : ""}`
+          : (suggestedFilename ?? `Document ${index}`);
+
+      setDocuments((prev) => [
+        ...prev,
+        {
+          id: nextDocIdRef.current++,
+          buffer,
+          mime,
+          suggestedFilename,
+          label,
+        },
+      ]);
+      finalizeIfReady();
+    },
+    [finalizeIfReady],
+  );
+
+  const handleChannelMessage = useRef<
+    (evMsg: MessageEvent<string | ArrayBuffer | Blob>) => Promise<void>
+  >(async () => {});
 
   useEffect(() => {
-    window.addEventListener("beforeprint", onBeforePrint);
+    handleChannelMessage.current = async (evMsg) => {
+      if (typeof evMsg.data === "string") {
+        const parsed: AnyJsonMessage | null = parseJsonMessage(evMsg.data);
+        if (!parsed) {
+          return;
+        }
+        if (
+          parsed.kind === "vaultprint-timer" ||
+          parsed.kind === "vaultprint-timer-adjust"
+        ) {
+          setRemainingSec(parsed.remainingSec);
+          return;
+        }
+        if (parsed.kind === "vaultprint-batch-start") {
+          resetPreview();
+          batchExpectedRef.current = parsed.totalFiles;
+          setStatus(
+            parsed.totalFiles === 1
+              ? "Receiving encrypted document…"
+              : `Receiving batch — ${parsed.totalFiles} documents…`,
+          );
+          return;
+        }
+        if (parsed.kind === "vaultprint-batch-complete") {
+          batchCompleteRef.current = true;
+          finalizeIfReady();
+          return;
+        }
+        if (parsed.kind === "vaultprint-file-start") {
+          const suggestedFilename =
+            typeof parsed.suggestedFilename === "string"
+              ? parsed.suggestedFilename
+              : undefined;
+          fillStateRef.current = {
+            target: new Uint8Array(parsed.byteLength),
+            expected: parsed.byteLength,
+            filled: 0,
+            mime: parsed.mimeType,
+            suggestedFilename,
+          };
+          return;
+        }
+        return;
+      }
+
+      let rawBuf: ArrayBuffer | null = null;
+      if (evMsg.data instanceof ArrayBuffer) {
+        rawBuf = evMsg.data;
+      } else if (evMsg.data instanceof Blob) {
+        rawBuf = await evMsg.data.arrayBuffer();
+      }
+      if (!rawBuf) {
+        return;
+      }
+      const state = fillStateRef.current;
+      if (!state) {
+        return;
+      }
+      const chunk = new Uint8Array(rawBuf);
+      state.target.set(chunk, state.filled);
+      state.filled += chunk.byteLength;
+      if (state.filled >= state.expected) {
+        const out = state.target.slice().buffer;
+        const { mime, suggestedFilename } = state;
+        fillStateRef.current = null;
+        onFileComplete(out, mime, suggestedFilename);
+      }
+    };
+  }, [finalizeIfReady, onFileComplete, resetPreview]);
+
+  useEffect(() => {
     window.addEventListener("afterprint", onAfterPrint);
     return () => {
-      window.removeEventListener("beforeprint", onBeforePrint);
       window.removeEventListener("afterprint", onAfterPrint);
     };
-  }, []);
+  }, [onAfterPrint]);
 
   useEffect(() => {
     const url = getSignalingUrl();
@@ -274,7 +287,7 @@ export function ReceiverClient() {
       socketRef.current = null;
       killMedia();
     };
-  }, []);
+  }, [killMedia]);
 
   onPeerReadyRef.current = async () => {
     if (!joinedPinRef.current || pcRef.current) {
@@ -308,81 +321,19 @@ export function ReceiverClient() {
       ch.onopen = () => {
         setChannelOpen(true);
         setStatus("Receiving encrypted document…");
+        void detectIcePath(pc).then(setIcePath);
       };
-      ch.onmessage = async (evMsg) => {
-        if (typeof evMsg.data === "string") {
-          const parsed: AnyJsonMessage | null = parseJsonMessage(evMsg.data);
-          if (!parsed) {
-            return;
-          }
-          if (
-            parsed.kind === "vaultprint-timer" ||
-            parsed.kind === "vaultprint-timer-adjust"
-          ) {
-            setRemainingSec(parsed.remainingSec);
-            return;
-          }
-          if (parsed.kind === "vaultprint-file-start") {
-            const suggestedFilename =
-              typeof parsed.suggestedFilename === "string"
-                ? parsed.suggestedFilename
-                : undefined;
-            fillStateRef.current = {
-              target: new Uint8Array(parsed.byteLength),
-              expected: parsed.byteLength,
-              filled: 0,
-              mime: parsed.mimeType,
-              suggestedFilename,
-            };
-            return;
-          }
-        } else {
-          let rawBuf: ArrayBuffer | null = null;
-          if (evMsg.data instanceof ArrayBuffer) {
-            rawBuf = evMsg.data;
-          } else if (evMsg.data instanceof Blob) {
-            rawBuf = await evMsg.data.arrayBuffer();
-          }
-          if (!rawBuf) {
-            return;
-          }
-          const state = fillStateRef.current;
-          if (!state) {
-            return;
-          }
-          const chunk = new Uint8Array(rawBuf);
-          state.target.set(chunk, state.filled);
-          state.filled += chunk.byteLength;
-          if (state.filled >= state.expected) {
-            /** Copy-only buffer (no pooled slack after the typed array). */
-            const out = state.target.slice().buffer;
-            fileBufferRef.current = out;
-            fillStateRef.current = null;
-            setPreviewReady(true);
-            setStatus("Document ready — verify on screen, then print.");
-            try {
-              const surface = await renderDocumentPreview(
-                out,
-                state.mime,
-                state.suggestedFilename,
-                canvasRef.current,
-                docxHostRef.current,
-              );
-              setPreviewSurface(surface);
-            } catch (e) {
-              setError(
-                e instanceof Error ? e.message : "Could not render preview for this file type.",
-              );
-              setPreviewSurface("none");
-            }
-          }
-        }
+      ch.onmessage = (evMsg) => {
+        void handleChannelMessage.current(evMsg);
       };
     };
 
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === "failed") {
         setError("Secure link failed — check network and session code.");
+      }
+      if (pc.connectionState === "connected") {
+        void detectIcePath(pc).then(setIcePath);
       }
     };
 
@@ -412,6 +363,8 @@ export function ReceiverClient() {
   const onPrint = () => {
     window.print();
   };
+
+  const hasPreview = documents.length > 0;
 
   return (
     <div className="vault-print-root vault-locked flex min-h-[80vh] flex-col gap-8 print-root">
@@ -456,13 +409,20 @@ export function ReceiverClient() {
             </span>
           </p>
         ) : null}
-        <div className="flex items-center gap-2 text-xs text-slate-500">
-          <span
-            className={`h-2 w-2 rounded-full ${
-              channelOpen ? "bg-vault-emerald" : "bg-slate-300"
-            }`}
-          />
-          Data channel: {channelOpen ? "open" : "idle"}
+        <div className="flex flex-col gap-1 text-xs text-slate-500">
+          <div className="flex items-center gap-2">
+            <span
+              className={`h-2 w-2 rounded-full ${
+                channelOpen ? "bg-vault-emerald" : "bg-slate-300"
+              }`}
+            />
+            Data channel: {channelOpen ? "open" : "idle"}
+          </div>
+          {channelOpen ? (
+            <p>ICE path: {icePathDisplay(icePath)}</p>
+          ) : turnConfigHint() ? (
+            <p className="text-amber-700">{turnConfigHint()}</p>
+          ) : null}
         </div>
       </section>
 
@@ -472,22 +432,29 @@ export function ReceiverClient() {
           onContextMenu={(e) => e.preventDefault()}
           style={{ WebkitUserSelect: "none", userSelect: "none" }}
         >
-          <canvas
-            ref={canvasRef}
-            className={`vault-print-canvas mx-auto block max-h-[65vh] w-auto max-w-full bg-vault-canvas ${
-              previewSurface === "docx" ? "hidden" : ""
-            }`}
-          />
-          <div
-            ref={docxHostRef}
-            className={`vault-docx-host text-[14px] leading-relaxed text-vault-navy ${
-              previewSurface === "docx" ? "block" : "hidden"
-            }`}
-          />
+          <div className="vault-print-host space-y-6">
+            {documents.map((doc) => (
+              <DocumentPreview
+                key={doc.id}
+                buffer={doc.buffer}
+                mime={doc.mime}
+                suggestedFilename={doc.suggestedFilename}
+                label={documents.length > 1 ? doc.label : undefined}
+              />
+            ))}
+          </div>
 
-          {!previewReady ? (
+          {!hasPreview ? (
             <p className="mt-6 text-center text-sm text-slate-500">
               Encrypted preview will appear here — nothing is written to disk.
+            </p>
+          ) : !printReady ? (
+            <p className="no-print mt-4 text-center text-xs text-slate-500">
+              Rendering incoming documents…
+            </p>
+          ) : documents.length > 1 ? (
+            <p className="no-print mt-4 text-center text-xs text-slate-500">
+              {documents.length} documents — scroll to review all pages before printing.
             </p>
           ) : null}
         </div>
@@ -495,7 +462,7 @@ export function ReceiverClient() {
         <button
           type="button"
           onClick={onPrint}
-          disabled={!previewReady}
+          disabled={!printReady || !hasPreview}
           className="no-print mt-8 min-h-[56px] w-full max-w-xl rounded-2xl bg-vault-emerald px-6 py-4 text-lg font-bold text-white shadow-lg shadow-emerald-200 transition hover:bg-emerald-600 disabled:cursor-not-allowed disabled:bg-slate-300"
         >
           PRINT

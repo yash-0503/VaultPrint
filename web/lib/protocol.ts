@@ -16,6 +16,17 @@ export type FileStartMessage = {
   suggestedFilename?: string;
 };
 
+/** Sender → receiver: start of a multi-file batch (optional for single-file sends). */
+export type BatchStartMessage = {
+  kind: "vaultprint-batch-start";
+  totalFiles: number;
+};
+
+/** Sender → receiver: all files in the batch have been transmitted. */
+export type BatchCompleteMessage = {
+  kind: "vaultprint-batch-complete";
+};
+
 /** Sender → receiver: timer sync / extensions (sent as JSON strings). */
 export type ControlMessage =
   | {
@@ -29,7 +40,11 @@ export type ControlMessage =
       remainingSec: number;
     };
 
-export type AnyJsonMessage = FileStartMessage | ControlMessage;
+export type AnyJsonMessage =
+  | FileStartMessage
+  | BatchStartMessage
+  | BatchCompleteMessage
+  | ControlMessage;
 
 export function parseJsonMessage(raw: string): AnyJsonMessage | null {
   try {

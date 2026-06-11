@@ -52,3 +52,11 @@ export const DEFAULT_RTC_CONFIGURATION: RTCConfiguration = {
   iceTransportPolicy:
     process.env.NEXT_PUBLIC_ICE_TRANSPORT_POLICY === "relay" ? "relay" : "all",
 };
+
+/** True when TURN URLs and credentials are all present in env. */
+export function hasTurnConfigured(): boolean {
+  const turnUrls = splitCsv(process.env.NEXT_PUBLIC_TURN_URLS);
+  const turnUsername = process.env.NEXT_PUBLIC_TURN_USERNAME?.trim() ?? "";
+  const turnCredential = process.env.NEXT_PUBLIC_TURN_CREDENTIAL?.trim() ?? "";
+  return turnUrls.length > 0 && Boolean(turnUsername) && Boolean(turnCredential);
+}

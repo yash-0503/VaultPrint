@@ -22,6 +22,31 @@ body {
   padding: 0;
 }
 
+/* On-screen preview — canvases are created imperatively inside DocumentPreview */
+.vault-print-host {
+  width: 100%;
+}
+
+.vault-print-document + .vault-print-document {
+  padding-top: 1.5rem;
+  border-top: 1px solid #e2e8f0;
+}
+
+.vault-print-canvas {
+  display: block;
+  margin-left: auto;
+  margin-right: auto;
+  max-width: 100%;
+  width: auto;
+  height: auto;
+  max-height: 70vh;
+  background: #f8fafc;
+}
+
+.vault-print-page + .vault-print-page {
+  margin-top: 1rem;
+}
+
 @media print {
   /**
    * Only the confidential document region is visible on paper —
@@ -75,6 +100,15 @@ body {
     -webkit-user-select: none !important;
   }
 
+  .vault-print-host {
+    width: 100% !important;
+  }
+
+  .vault-print-document + .vault-print-document {
+    page-break-before: always;
+    break-before: page;
+  }
+
   .vault-print-canvas {
     display: block !important;
     max-width: 100% !important;
@@ -83,6 +117,12 @@ body {
     max-height: none !important;
     margin: 0 auto !important;
     page-break-inside: avoid;
+  }
+
+  .vault-print-page + .vault-print-page {
+    page-break-before: always;
+    break-before: page;
+    margin-top: 0 !important;
   }
 
   .vault-docx-host {
