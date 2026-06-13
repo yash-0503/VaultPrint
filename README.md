@@ -4,6 +4,8 @@
 
 A customer sends a PDF or image from their phone; the print shop opens a link on their PC, enters a short session code, previews the document in the browser, and prints. **Your file never touches our servers.**
 
+Note: Working Demo at the End✌️.
+
 ---
 
 ## Use case
@@ -167,6 +169,7 @@ Set `CORS_ORIGINS` on the server to your Vercel URL. Set `NEXT_PUBLIC_SIGNALING_
 
 ---
 
-## License
 
-Private / confidential — Xerox confidentiality context. Adjust as needed for your org.
+https://github.com/user-attachments/assets/44598d0c-dd1e-4274-9533-952d0a1c99e0
+
+
